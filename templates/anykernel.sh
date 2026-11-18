@@ -12,13 +12,43 @@ do.cleanup=1
 do.cleanuponabort=0
 device.name1=phoenix
 device.name2=phoenixin
+device.name3=phoenix_in
+device.name4=Redmi K30
+device.name5=POCO X2
 supported.versions=11 - 15
 '; } # end properties
 
-# shell variables
-block=/dev/block/bootdevice/by-name/boot;
-is_slot_device=0;
+# Dynamic partition block detection for Poco X2 / Redmi K30
+BLOCK="";
+for p in \
+  /dev/block/by-name/boot \
+  /dev/block/bootdevice/by-name/boot \
+  /dev/block/platform/soc/1d84000.ufshc/by-name/boot \
+  /dev/block/platform/soc/*/by-name/boot \
+  /dev/block/platform/*/*/by-name/boot \
+  /dev/block/mapper/boot; do
+  if [ -e "$p" ]; then
+    BLOCK="$p";
+    break;
+  fi;
+done;
+
+if [ -z "$BLOCK" ]; then
+  find_boot=$(find /dev/block -name "boot" 2>/dev/null | head -n 1);
+  if [ -n "$find_boot" ] && [ -e "$find_boot" ]; then
+    BLOCK="$find_boot";
+  else
+    BLOCK=boot;
+  fi;
+fi;
+
+# Set both upper and lower case for maximum AK3 version compatibility
+block=$BLOCK;
+IS_SLOT_DEVICE=auto;
+is_slot_device=auto;
+RAMDISK_COMPRESSION=auto;
 ramdisk_compression=auto;
+PATCH_VBMETA_FLAG=auto;
 patch_vbmeta_flag=auto;
 
 ## AnyKernel methods (DO NOT CHANGE)
