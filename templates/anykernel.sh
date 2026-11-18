@@ -7,11 +7,12 @@ properties() { '
 kernel.string=Phoenix Kernel with KernelSU-Next & SuSFS by hpbzareth
 do.devicecheck=1
 do.modules=0
+do.systemless=1
 do.cleanup=1
 do.cleanuponabort=0
 device.name1=phoenix
 device.name2=phoenixin
-supported.versions=
+supported.versions=11 - 15
 '; } # end properties
 
 # shell variables

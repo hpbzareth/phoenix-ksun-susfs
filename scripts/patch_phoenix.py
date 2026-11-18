@@ -528,7 +528,7 @@ def main():
     log(f"Kernel source dir: {kernel_dir}")
     log(f"Patches dir: {patches_dir}")
     
-    inject_poll_helpers(kernel_dir)
+    # inject_poll_helpers is NOT needed on 4.14.357-openela since uapi/linux/types.h already has __poll_t
     inject_path_umount(kernel_dir)
     patch_fs_files(kernel_dir)
     
