@@ -87,178 +87,29 @@ EXPORT_SYMBOL(path_umount);
                 f.write(ih_content)
             log("Added path_umount declaration to fs/internal.h")
 
-def patch_fs_files(kernel_dir):
-    # 1. fs/Makefile
-    mk = os.path.join(kernel_dir, "fs", "Makefile")
-    if os.path.exists(mk):
-        with open(mk, "r", encoding="utf-8", errors="ignore") as f:
-            c = f.read()
-        if "CONFIG_KSU_SUSFS" not in c:
-            c = c.replace("nsfs.o", "nsfs.o\nobj-$(CONFIG_KSU_SUSFS) += susfs.o\n", 1)
-            with open(mk, "w", encoding="utf-8", newline="\n") as f:
-                f.write(c)
-            log("Patched fs/Makefile")
+def apply_susfs_patch(kernel_dir, patch_file):
+    if not os.path.exists(patch_file):
+        log(f"Patch file {patch_file} not found!")
+        return False
+    
+    log(f"Applying SuSFS 2.2 kernel patch: {patch_file}")
+    res = subprocess.run(["git", "apply", "-C1", "--ignore-whitespace", "--whitespace=nowarn", "--recount", patch_file],
+                         cwd=kernel_dir, capture_output=True, text=True)
+    if res.returncode == 0:
+        log("SuSFS 2.2 patch applied cleanly!")
+        return True
+    
+    log(f"Direct git apply failed: {res.stderr.strip()[:300]}")
+    if shutil.which("patch"):
+        log("Retrying with patch -p1 --fuzz=3...")
+        res3 = subprocess.run(["patch", "-p1", "--fuzz=3", "-i", patch_file],
+                              cwd=kernel_dir, capture_output=True, text=True)
+        if res3.returncode == 0:
+            log("SuSFS 2.2 patch applied via patch -p1 --fuzz=3!")
+            return True
+        log(f"Patch stderr: {res3.stderr[:300]}")
 
-    # 2. fs/proc/cmdline.c
-    cmd_c = os.path.join(kernel_dir, "fs", "proc", "cmdline.c")
-    if os.path.exists(cmd_c):
-        with open(cmd_c, "r", encoding="utf-8", errors="ignore") as f:
-            c = f.read()
-        if "susfs_spoof_cmdline_or_bootconfig" not in c:
-            hdr = """#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-extern int susfs_spoof_cmdline_or_bootconfig(struct seq_file *m);
-#endif
-"""
-            c = hdr + c
-            target = "static int cmdline_proc_show(struct seq_file *m, void *v)\n{"
-            hook = target + """
-#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-\tif (!susfs_spoof_cmdline_or_bootconfig(m)) {
-\t\tseq_putc(m, '\\n');
-\t\treturn 0;
-\t}
-#endif"""
-            c = c.replace(target, hook, 1)
-            with open(cmd_c, "w", encoding="utf-8", newline="\n") as f:
-                f.write(c)
-            log("Patched fs/proc/cmdline.c")
-
-    # 3. fs/proc/task_mmu.c
-    tmmu_c = os.path.join(kernel_dir, "fs", "proc", "task_mmu.c")
-    if os.path.exists(tmmu_c):
-        with open(tmmu_c, "r", encoding="utf-8", errors="ignore") as f:
-            c = f.read()
-        if "susfs_sus_ino_for_show_map_vma" not in c:
-            inc = """#if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
-#include <linux/susfs_def.h>
-#endif
-#include <linux/shmem_fs.h>"""
-            c = c.replace("#include <linux/shmem_fs.h>", inc, 1)
-
-            fwd = """#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
-extern void susfs_sus_ino_for_show_map_vma(unsigned long ino, dev_t *out_dev, unsigned long *out_ino);
-#endif
-
-static void\nshow_map_vma"""
-            c = c.replace("static void\nshow_map_vma", fwd, 1)
-
-            old_code = """\t\tdev = inode->i_sb->s_dev;
-\t\tino = inode->i_ino;"""
-            new_code = """#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
-\t\tif (unlikely(inode->i_state & INODE_STATE_SUS_KSTAT)) {
-\t\t\tsusfs_sus_ino_for_show_map_vma(inode->i_ino, &dev, &ino);
-\t\t\tgoto bypass_orig_flow;
-\t\t}
-#endif
-\t\tdev = inode->i_sb->s_dev;
-\t\tino = inode->i_ino;
-#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
-bypass_orig_flow:
-#endif"""
-            c = c.replace(old_code, new_code, 1)
-
-            old_smap = "static void smap_gather_stats(struct vm_area_struct *vma,\n\t\t\t     struct mem_size_stats *mss)\n{"
-            new_smap = old_smap + """
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-\tif (vma->vm_file && SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {
-\t\treturn;
-\t}
-#endif"""
-            c = c.replace(old_smap, new_smap, 1)
-
-            with open(tmmu_c, "w", encoding="utf-8", newline="\n") as f:
-                f.write(c)
-            log("Patched fs/proc/task_mmu.c")
-
-    # 4. fs/proc/base.c
-    base_c = os.path.join(kernel_dir, "fs", "proc", "base.c")
-    if os.path.exists(base_c):
-        with open(base_c, "r", encoding="utf-8", errors="ignore") as f:
-            c = f.read()
-        if "CONFIG_KSU_SUSFS_SUS_MAP" not in c:
-            hdr_target = '#include "fd.h"'
-            hdr_repl = """#include "fd.h"
-#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
-#include <linux/susfs_def.h>
-#endif"""
-            c = c.replace(hdr_target, hdr_repl, 1)
-
-            fwd_target = "static int do_proc_readlink(struct path *path, char __user *buffer, int buflen)"
-            fwd_repl = """#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-extern int susfs_open_redirect_spoof_do_proc_readlink(struct inode *inode, char *tmp_buf, int buflen);
-#endif
-
-static int do_proc_readlink(struct path *path, char __user *buffer, int buflen)"""
-            c = c.replace(fwd_target, fwd_repl, 1)
-
-            readlink_target = "\tif (!tmp)\n\t\treturn -ENOMEM;\n"
-            readlink_repl = readlink_target + """
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-\tif (SUSFS_IS_INODE_OPEN_REDIRECT(path->dentry->d_inode)) {
-\t\tif (!susfs_open_redirect_spoof_do_proc_readlink(path->dentry->d_inode, tmp, buflen)) {
-\t\t\tlen = strlen(tmp);
-\t\t\tif (copy_to_user(buffer, tmp, len))
-\t\t\t\tlen = -EFAULT;
-\t\t\tgoto out;
-\t\t}
-\t}
-#endif
-"""
-            c = c.replace(readlink_target, readlink_repl, 1)
-
-            map_target = """\t\t\tif (!vma->vm_file)
-\t\t\t\tcontinue;"""
-            map_repl = map_target + """
-#ifdef CONFIG_KSU_SUSFS_SUS_MAP
-\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {
-\t\t\t\tcontinue;
-\t}
-#endif"""
-            c = c.replace(map_target, map_repl, 1)
-
-            with open(base_c, "w", encoding="utf-8", newline="\n") as f:
-                f.write(c)
-            log("Patched fs/proc/base.c")
-
-    # 5. security/selinux/avc.c
-    avc_c = os.path.join(kernel_dir, "security", "selinux", "avc.c")
-    if os.path.exists(avc_c):
-        with open(avc_c, "r", encoding="utf-8", errors="ignore") as f:
-            c = f.read()
-        if "susfs_is_avc_log_spoofing_enabled" not in c:
-            avc_hdr = """#define avc_cache_stats_incr(field)\tdo {} while (0)
-#endif
-
-#ifdef CONFIG_KSU_SUSFS
-extern u32 susfs_ksu_sid;
-extern u32 susfs_priv_app_sid;
-bool susfs_is_avc_log_spoofing_enabled = false;
-#endif"""
-            c = c.replace("#define avc_cache_stats_incr(field)\tdo {} while (0)\n#endif", avc_hdr, 1)
-
-            avc_dump_target = "rc = security_sid_to_context(state, tsid, &scontext, &scontext_len);"
-            avc_dump_repl = avc_dump_target + """
-#ifdef CONFIG_KSU_SUSFS
-\tif (unlikely(tsid == susfs_ksu_sid && susfs_is_avc_log_spoofing_enabled)) {
-\t\tif (rc)
-\t\t\taudit_log_format(ab, " tsid=%d", susfs_priv_app_sid);
-\t\telse
-\t\t\taudit_log_format(ab, " tcontext=%s", "u:r:priv_app:s0:c512,c768");
-\t\tgoto bypass_orig_flow;
-\t}
-#endif"""
-            c = c.replace(avc_dump_target, avc_dump_repl, 1)
-
-            avc_bypass_target = "BUG_ON(!tclass || tclass >= ARRAY_SIZE(secclass_map));"
-            avc_bypass_repl = """#ifdef CONFIG_KSU_SUSFS
-bypass_orig_flow:
-#endif
-\tBUG_ON(!tclass || tclass >= ARRAY_SIZE(secclass_map));"""
-            c = c.replace(avc_bypass_target, avc_bypass_repl, 1)
-
-            with open(avc_c, "w", encoding="utf-8", newline="\n") as f:
-                f.write(c)
-            log("Patched security/selinux/avc.c")
+    return False
 
 def copy_susfs_files(kernel_dir, susfs_dir):
     fs_dir = os.path.join(kernel_dir, "fs")
@@ -359,7 +210,6 @@ def patch_ksu_arm64_414(kernel_dir):
 #define SYS_FSTAT_SYMBOL "sys_newfstat"
 #endif"""
         if target in c and "LINUX_VERSION_CODE" not in c:
-            # Replace the entire block if found
             old_block = """#define REBOOT_SYMBOL "__arm64_sys_reboot"
 #define SYS_READ_SYMBOL "__arm64_sys_read"
 #define SYS_EXECVE_SYMBOL "__arm64_sys_execve"
@@ -583,13 +433,12 @@ def main():
     log(f"Patches dir: {patches_dir}")
     
     inject_path_umount(kernel_dir)
-    patch_fs_files(kernel_dir)
     
-    phoenix_patch = os.path.join(patches_dir, "susfs_v2.2_for_begonia.patch")
-    if os.path.exists(phoenix_patch):
-        log("Applying remaining SuSFS 2.2 hooks via git apply...")
-        subprocess.run(["git", "apply", "-C1", "--ignore-whitespace", "--whitespace=nowarn", phoenix_patch],
-                       cwd=kernel_dir, capture_output=True, text=True)
+    phoenix_patch = os.path.join(patches_dir, "susfs_v2.2_for_phoenix.patch")
+    if not os.path.exists(phoenix_patch):
+        phoenix_patch = os.path.join(patches_dir, "susfs_v2.2_for_begonia.patch")
+        
+    apply_susfs_patch(kernel_dir, phoenix_patch)
 
     susfs_dir = os.path.join(patches_dir, "susfs")
     copy_susfs_files(kernel_dir, susfs_dir)
