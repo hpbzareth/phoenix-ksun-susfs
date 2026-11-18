@@ -30,7 +30,7 @@ on:
         description: "GitHub Release Tag to publish/update"
         required: false
         type: string
-        default: "Revision-1"
+        default: "Revision-3"
 
 jobs:
   build:
@@ -151,7 +151,9 @@ jobs:
         run: |
           mkdir -p $GITHUB_WORKSPACE/out
           export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          VARIANT="${{ inputs.su_variant }}"
 
+          # 1. Generate base defconfig
           make -j$(nproc --all) \
             O=$GITHUB_WORKSPACE/out \
             ARCH=arm64 \
@@ -160,6 +162,57 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             vendor/phoenix_defconfig
+
+          # 2. Force enable KernelSU & SuSFS configs if not vanilla
+          if [ "$VARIANT" != "vanilla" ]; then
+            echo "Enforcing KernelSU configs on output .config..."
+            scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU
+            scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_NEXT
+            scripts/config --file $GITHUB_WORKSPACE/out/.config -e KPROBES
+            scripts/config --file $GITHUB_WORKSPACE/out/.config -e KPROBE_EVENTS
+            scripts/config --file $GITHUB_WORKSPACE/out/.config -e KRETPROBES
+            scripts/config --file $GITHUB_WORKSPACE/out/.config -e HAVE_KPROBES
+            scripts/config --file $GITHUB_WORKSPACE/out/.config -e HAVE_KRETPROBES
+            scripts/config --file $GITHUB_WORKSPACE/out/.config -e HAVE_SYSCALL_TRACEPOINTS
+            scripts/config --file $GITHUB_WORKSPACE/out/.config -e OVERLAY_FS
+
+            if [ "$VARIANT" = "ksun_uapi5_susfs" ]; then
+              echo "Enforcing SuSFS configs on output .config..."
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_SUS_PATH
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_SUS_MOUNT
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_SUS_KSTAT
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_SUS_OVERLAYFS
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_TRY_UMOUNT
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_SPOOF_UNAME
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_ENABLE_LOG
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_OPEN_REDIRECT
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_SUS_MAP
+              scripts/config --file $GITHUB_WORKSPACE/out/.config -e KSU_SUSFS_SUS_MEMFD
+            fi
+
+            # 3. Synchronize with Kconfig dependencies
+            make -j$(nproc --all) \
+              O=$GITHUB_WORKSPACE/out \
+              ARCH=arm64 \
+              CC=clang \
+              CLANG_TRIPLE=aarch64-linux-gnu- \
+              CROSS_COMPILE=aarch64-linux-gnu- \
+              CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+              olddefconfig
+
+            # 4. Strict validation assertion
+            if ! grep -q "CONFIG_KSU=y" $GITHUB_WORKSPACE/out/.config; then
+              echo "❌ FATAL: CONFIG_KSU is NOT enabled in .config!"
+              exit 1
+            fi
+            echo "✅ Confirmed CONFIG_KSU=y is active in .config"
+          fi
 
           echo "=== Verifying Generated Configs ==="
           grep -E "CONFIG_KSU|CONFIG_SUSFS|CONFIG_ZRAM|CONFIG_ZSTD|CONFIG_ANDROID_SIMPLE_LMK|CONFIG_LITTLE_CPU_MASK" $GITHUB_WORKSPACE/out/.config || true

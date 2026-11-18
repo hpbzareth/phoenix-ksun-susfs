@@ -7,42 +7,6 @@ import subprocess
 def log(msg):
     print(f"[+] {msg}", flush=True)
 
-def inject_poll_helpers(kernel_dir):
-    poll_h = os.path.join(kernel_dir, "include", "linux", "poll.h")
-    if os.path.exists(poll_h):
-        with open(poll_h, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-        if "__poll_t" not in content:
-            target = "#include <uapi/linux/poll.h>"
-            helpers = """#include <uapi/linux/poll.h>
-
-#ifndef __poll_t
-#define __poll_t __poll_t
-typedef unsigned int __poll_t;
-#endif
-"""
-            if target in content:
-                content = content.replace(target, helpers, 1)
-                with open(poll_h, "w", encoding="utf-8", newline="\n") as f:
-                    f.write(content)
-                log("Injected __poll_t typedef into include/linux/poll.h")
-
-    # Fallback in event_queue.h if present
-    eq_h = os.path.join(kernel_dir, "drivers", "kernelsu", "kernel", "infra", "event_queue.h")
-    if os.path.exists(eq_h):
-        with open(eq_h, "r", encoding="utf-8", errors="ignore") as f:
-            c = f.read()
-        if "__poll_t" not in c:
-            hdr = """#ifndef __poll_t
-#define __poll_t __poll_t
-typedef unsigned int __poll_t;
-#endif
-"""
-            c = hdr + c
-            with open(eq_h, "w", encoding="utf-8", newline="\n") as f:
-                f.write(c)
-            log("Injected __poll_t fallback into event_queue.h")
-
 def inject_path_umount(kernel_dir):
     ns_c = os.path.join(kernel_dir, "fs", "namespace.c")
     if not os.path.exists(ns_c):
@@ -65,35 +29,35 @@ def inject_path_umount(kernel_dir):
         path_umount_impl = """
 static int can_umount(const struct path *path, int flags)
 {
-\tstruct mount *mnt = real_mount(path->mnt);
+	struct mount *mnt = real_mount(path->mnt);
 
-\tif (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
-\t\treturn -EINVAL;
-\tif (!may_mount())
-\t\treturn -EPERM;
-\tif (path->dentry != path->mnt->mnt_root)
-\t\treturn -EINVAL;
-\tif (!check_mnt(mnt))
-\t\treturn -EINVAL;
-\tif (mnt->mnt.mnt_flags & MNT_LOCKED)
-\t\treturn -EINVAL;
-\tif (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
-\t\treturn -EPERM;
-\treturn 0;
+	if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
+		return -EINVAL;
+	if (!may_mount())
+		return -EPERM;
+	if (path->dentry != path->mnt->mnt_root)
+		return -EINVAL;
+	if (!check_mnt(mnt))
+		return -EINVAL;
+	if (mnt->mnt.mnt_flags & MNT_LOCKED)
+		return -EINVAL;
+	if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	return 0;
 }
 
 int path_umount(struct path *path, int flags)
 {
-\tstruct mount *mnt = real_mount(path->mnt);
-\tint ret;
+	struct mount *mnt = real_mount(path->mnt);
+	int ret;
 
-\tret = can_umount(path, flags);
-\tif (!ret)
-\t\tret = do_umount(mnt, flags);
+	ret = can_umount(path, flags);
+	if (!ret)
+		ret = do_umount(mnt, flags);
 
-\tdput(path->dentry);
-\tmntput_no_expire(mnt);
-\treturn ret;
+	dput(path->dentry);
+	mntput_no_expire(mnt);
+	return ret;
 }
 EXPORT_SYMBOL(path_umount);
 
@@ -246,9 +210,9 @@ static int do_proc_readlink(struct path *path, char __user *buffer, int buflen)"
 \t\t\t\tcontinue;"""
             map_repl = map_target + """
 #ifdef CONFIG_KSU_SUSFS_SUS_MAP
-\t\t\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {
+\tif (SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))) {
 \t\t\t\tcontinue;
-\t\t\t}
+\t}
 #endif"""
             c = c.replace(map_target, map_repl, 1)
 
@@ -375,6 +339,91 @@ EXPORT_SYMBOL(setup_selinux);
                 f.write(c)
             log("Injected SuSFS bridging symbols into drivers/kernelsu/kernel/selinux/selinux.c")
 
+def patch_ksu_arm64_414(kernel_dir):
+    # 1. drivers/kernelsu/kernel/include/arch.h
+    # Linux 4.14 ARM64 does not use syscall wrapper (__arm64_sys_*). It uses sys_*
+    arch_h = os.path.join(kernel_dir, "drivers", "kernelsu", "kernel", "include", "arch.h")
+    if os.path.exists(arch_h):
+        with open(arch_h, "r", encoding="utf-8", errors="ignore") as f:
+            c = f.read()
+        target = '#define REBOOT_SYMBOL "__arm64_sys_reboot"'
+        repl = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0)
+#define REBOOT_SYMBOL "__arm64_sys_reboot"
+#define SYS_READ_SYMBOL "__arm64_sys_read"
+#define SYS_EXECVE_SYMBOL "__arm64_sys_execve"
+#define SYS_FSTAT_SYMBOL "__arm64_sys_newfstat"
+#else
+#define REBOOT_SYMBOL "sys_reboot"
+#define SYS_READ_SYMBOL "sys_read"
+#define SYS_EXECVE_SYMBOL "sys_execve"
+#define SYS_FSTAT_SYMBOL "sys_newfstat"
+#endif"""
+        if target in c and "LINUX_VERSION_CODE" not in c:
+            # Replace the entire block if found
+            old_block = """#define REBOOT_SYMBOL "__arm64_sys_reboot"
+#define SYS_READ_SYMBOL "__arm64_sys_read"
+#define SYS_EXECVE_SYMBOL "__arm64_sys_execve"
+// https://cs.android.com/android/kernel/superproject/+/common-android-mainline:common/scripts/syscalltbl.sh;l=57;drc=9142be9e6443fd641ca37f820efe00d9cd890eb1
+// https://cs.android.com/android/kernel/superproject/+/common-android-mainline:common/scripts/syscall.tbl;l=104;drc=b36d4b6aa88ef039647228b98c59a875e92f8c8e
+#define SYS_FSTAT_SYMBOL "__arm64_sys_newfstat\""""
+            if old_block in c:
+                c = c.replace(old_block, repl, 1)
+            else:
+                c = c.replace(target, repl, 1)
+            with open(arch_h, "w", encoding="utf-8", newline="\n") as f:
+                f.write(c)
+            log("Patched arch.h for 4.14 non-syscall-wrapper ARM64 symbols (sys_reboot, sys_execve, etc.)")
+
+    # 2. drivers/kernelsu/kernel/hook/arm64/syscall_hook.c
+    # In Linux 4.14 ARM64, ni_syscall is 'sys_ni_syscall' not '__arm64_sys_ni_syscall'
+    hook_c = os.path.join(kernel_dir, "drivers", "kernelsu", "kernel", "hook", "arm64", "syscall_hook.c")
+    if os.path.exists(hook_c):
+        with open(hook_c, "r", encoding="utf-8", errors="ignore") as f:
+            c = f.read()
+        old_slot = 'ni_syscall = (unsigned long)ksu_resolve_symbol_for_functable_hook("__arm64_sys_ni_syscall");'
+        new_slot = """ni_syscall = (unsigned long)ksu_resolve_symbol_for_functable_hook("__arm64_sys_ni_syscall");
+    if (!ni_syscall)
+        ni_syscall = (unsigned long)ksu_resolve_symbol_for_functable_hook("sys_ni_syscall");"""
+        if old_slot in c and "sys_ni_syscall" not in c:
+            c = c.replace(old_slot, new_slot, 1)
+            with open(hook_c, "w", encoding="utf-8", newline="\n") as f:
+                f.write(c)
+            log("Patched syscall_hook.c to resolve sys_ni_syscall on Linux 4.14")
+
+    # 3. drivers/kernelsu/kernel/selinux/rules.c
+    # Ensure susfs_set_batch_sid() is called so SuSFS knows the KSU domain
+    rules_c = os.path.join(kernel_dir, "drivers", "kernelsu", "kernel", "selinux", "rules.c")
+    if os.path.exists(rules_c):
+        with open(rules_c, "r", encoding="utf-8", errors="ignore") as f:
+            c = f.read()
+        if "susfs_set_batch_sid" not in c:
+            target = "reset_avc_cache();\nout_unlock:"
+            repl = """reset_avc_cache();
+#ifdef CONFIG_KSU_SUSFS
+    extern void susfs_set_batch_sid(void);
+    susfs_set_batch_sid();
+#endif
+out_unlock:"""
+            c = c.replace(target, repl, 1)
+            with open(rules_c, "w", encoding="utf-8", newline="\n") as f:
+                f.write(c)
+            log("Injected susfs_set_batch_sid() hook into selinux/rules.c")
+
+    # 4. drivers/kernelsu/kernel/manager/apk_sign.c
+    # Support both KernelSU-Next and official KernelSU Manager signatures
+    apk_c = os.path.join(kernel_dir, "drivers", "kernelsu", "kernel", "manager", "apk_sign.c")
+    if os.path.exists(apk_c):
+        with open(apk_c, "r", encoding="utf-8", errors="ignore") as f:
+            c = f.read()
+        old_sign = "return check_v2_signature(path, EXPECTED_MANAGER_SIZE, EXPECTED_MANAGER_HASH);"
+        new_sign = """return check_v2_signature(path, EXPECTED_MANAGER_SIZE, EXPECTED_MANAGER_HASH) ||
+	       check_v2_signature(path, 0x377, "d3469712b6214462764a1d8d3e5cbe1d6819a0b629791b9f4101867821f1df64");"""
+        if old_sign in c:
+            c = c.replace(old_sign, new_sign, 1)
+            with open(apk_c, "w", encoding="utf-8", newline="\n") as f:
+                f.write(c)
+            log("Enhanced apk_sign.c to accept both KSU-Next and official Manager signatures")
+
 def setup_ksu_makefiles(kernel_dir, patches_dir):
     # 1. Copy su_variants.Kconfig to drivers/su_variants.Kconfig
     su_variants_src = os.path.join(patches_dir, "su_variants.Kconfig")
@@ -436,6 +485,9 @@ def tune_phoenix_defconfig(kernel_dir):
         "CONFIG_KPROBES",
         "CONFIG_KPROBE_EVENTS",
         "CONFIG_HAVE_KPROBES",
+        "CONFIG_HAVE_KRETPROBES",
+        "CONFIG_KRETPROBES",
+        "CONFIG_HAVE_SYSCALL_TRACEPOINTS",
         "CONFIG_ZRAM",
         "CONFIG_ZSTD",
         "CONFIG_CRYPTO_ZSTD",
@@ -453,11 +505,13 @@ def tune_phoenix_defconfig(kernel_dir):
 # === KernelSU-Next & SuSFS 2.x Integration ===
 CONFIG_KSU_NEXT=y
 CONFIG_KSU=y
-CONFIG_KSU_MANUAL_HOOK=y
 CONFIG_OVERLAY_FS=y
 CONFIG_KPROBES=y
 CONFIG_KPROBE_EVENTS=y
 CONFIG_HAVE_KPROBES=y
+CONFIG_HAVE_KRETPROBES=y
+CONFIG_KRETPROBES=y
+CONFIG_HAVE_SYSCALL_TRACEPOINTS=y
 
 # SuSFS 2.2 Features
 CONFIG_KSU_SUSFS=y
@@ -528,11 +582,9 @@ def main():
     log(f"Kernel source dir: {kernel_dir}")
     log(f"Patches dir: {patches_dir}")
     
-    # inject_poll_helpers is NOT needed on 4.14.357-openela since uapi/linux/types.h already has __poll_t
     inject_path_umount(kernel_dir)
     patch_fs_files(kernel_dir)
     
-    # Try git apply for the remaining clean files in the patch
     phoenix_patch = os.path.join(patches_dir, "susfs_v2.2_for_begonia.patch")
     if os.path.exists(phoenix_patch):
         log("Applying remaining SuSFS 2.2 hooks via git apply...")
@@ -542,6 +594,7 @@ def main():
     susfs_dir = os.path.join(patches_dir, "susfs")
     copy_susfs_files(kernel_dir, susfs_dir)
     bridge_ksu_susfs(kernel_dir)
+    patch_ksu_arm64_414(kernel_dir)
     setup_ksu_makefiles(kernel_dir, patches_dir)
     tune_phoenix_defconfig(kernel_dir)
     

@@ -69,6 +69,7 @@ write_boot;
 
 # Install post-boot performance daemon if Magisk/KernelSU service.d exists
 if [ -f $home/00-phoenix-perf.sh ]; then
+  [ -d /data/adb ] && mkdir -p /data/adb/service.d /data/adb/post-fs-data.d 2>/dev/null;
   for sdir in /data/adb/service.d /data/adb/post-fs-data.d; do
     if [ -d "$sdir" ]; then
       ui_print "  • Installing Phoenix RAM & Memory Speed Optimizer to $sdir...";

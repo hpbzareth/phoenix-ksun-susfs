@@ -1,3 +1,5 @@
+source "drivers/kernelsu/kernel/Kconfig"
+
 choice
 	prompt "Select SU variant"
 	optional
@@ -11,25 +13,6 @@ config KSU_NEXT
 	select KSU
 	help
 	  Enable KernelSU Next with SuSFS support.
-
-endchoice
-
-choice
-	prompt "Hook method"
-	depends on KSU_NEXT
-	default KSU_MANUAL_HOOK
-	help
-	  Select which hook method to use.
-
-config KSU_KPROBES_HOOK
-	bool "Use kprobes"
-	help
-	  Use kprobes for function hooking.
-
-config KSU_MANUAL_HOOK
-	bool "Use manual hooks"
-	help
-	  Use manual hooks for function hooking.
 
 endchoice
 
