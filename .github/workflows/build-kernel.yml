@@ -1,0 +1,286 @@
+name: "🔥 Build Poco X2 / Redmi K30 Kernel with KernelSU-Next & SuSFS"
+
+on:
+  workflow_dispatch:
+    inputs:
+      su_variant:
+        description: "SU & SuSFS Variant to build"
+        required: true
+        default: "ksun_uapi5_susfs"
+        type: choice
+        options:
+          - "ksun_uapi5_susfs"
+          - "ksun_uapi5_nosusfs"
+          - "vanilla"
+      clang_type:
+        description: "Toolchain / Compiler (proton: Proton Clang 13 [recommended], zyc: ZyC Clang 14, aosp: AOSP Clang r450784d)"
+        required: true
+        default: "proton"
+        type: choice
+        options:
+          - "proton"
+          - "zyc"
+          - "aosp"
+      make_release:
+        description: "Publish/Attach build to GitHub Release"
+        required: false
+        type: boolean
+        default: true
+      release_tag:
+        description: "GitHub Release Tag to publish/update"
+        required: false
+        type: string
+        default: "Revision-1"
+
+jobs:
+  build:
+    name: "⚡ Build Phoenix (${{ inputs.su_variant }} | ${{ inputs.clang_type }})"
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: "🧹 Free runner disk space"
+        run: |
+          echo "=== Freeing runner disk space ==="
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -a -f || true
+          df -h
+
+      - name: "📥 Checkout builder repository"
+        uses: actions/checkout@v4
+
+      - name: "📦 Install build dependencies"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential bc bison flex \
+            libssl-dev libelf-dev libfl-dev \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            curl git zip unzip python3 ccache perl jq wget xxd
+          sudo apt-get install -y libtinfo5 || true
+
+      - name: "💾 Setup swap memory (16G)"
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 16G /mnt/swapfile || sudo dd if=/dev/zero of=/mnt/swapfile bs=1M count=16384
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          free -h
+
+      - name: "🔧 Setup Clang Toolchain"
+        run: |
+          CLANG_TYPE="${{ inputs.clang_type }}"
+          echo "=== Setting up Clang ($CLANG_TYPE) ==="
+          mkdir -p $GITHUB_WORKSPACE/clang
+
+          case "$CLANG_TYPE" in
+            proton)
+              git clone --depth=1 https://github.com/kdrag0n/proton-clang.git $GITHUB_WORKSPACE/clang
+              ;;
+            zyc)
+              git clone --depth=1 -b 14 https://gitlab.com/ZyCromerZ/Clang.git $GITHUB_WORKSPACE/clang
+              ;;
+            aosp)
+              wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/android-13.0.0_r0.1/clang-r450784d.tar.gz -O /tmp/clang.tar.gz
+              tar -xzf /tmp/clang.tar.gz -C $GITHUB_WORKSPACE/clang
+              rm -f /tmp/clang.tar.gz
+              ;;
+            *)
+              git clone --depth=1 https://github.com/kdrag0n/proton-clang.git $GITHUB_WORKSPACE/clang
+              ;;
+          esac
+
+          echo "$GITHUB_WORKSPACE/clang/bin" >> $GITHUB_PATH
+          echo "Clang version:"
+          $GITHUB_WORKSPACE/clang/bin/clang --version | head -n 1
+
+      - name: "📥 Clone Kernel Source (v2.4)"
+        run: |
+          echo "=== Cloning tillua467-s-Playground/android_kernel_xiaomi_phoenix branch v2.4 ==="
+          git clone --depth=1 -b v2.4 https://github.com/tillua467-s-Playground/android_kernel_xiaomi_phoenix.git kernel_source
+          cd kernel_source
+          echo "Kernel HEAD: $(git rev-parse HEAD)"
+          git log -1 --oneline
+
+      - name: "🌿 Integrate KernelSU-Next (v3.4.2 - UAPI 5)"
+        run: |
+          VARIANT="${{ inputs.su_variant }}"
+          if [ "$VARIANT" = "vanilla" ]; then
+            echo "Vanilla build selected: skipping KernelSU-Next integration."
+            exit 0
+          fi
+
+          echo "=== Fetching official KernelSU-Next v3.4.2 Release (UAPI 5) ==="
+          git clone --depth=1 -b v3.4.2 https://github.com/KernelSU-Next/KernelSU-Next.git kernel_source/drivers/kernelsu
+          
+          echo "Ensuring UAPI version 5..."
+          if [ -f "kernel_source/drivers/kernelsu/uapi/supercall.h" ]; then
+            sed -i 's/#define KERNEL_SU_UAPI_VERSION .*/#define KERNEL_SU_UAPI_VERSION 5/' kernel_source/drivers/kernelsu/uapi/supercall.h || true
+            sed -i 's/static const __u32 KERNEL_SU_UAPI_VERSION = .*/static const __u32 KERNEL_SU_UAPI_VERSION = 5;/' kernel_source/drivers/kernelsu/uapi/supercall.h || true
+          fi
+          
+          if [ -f "kernel_source/drivers/kernelsu/kernel/Kbuild" ]; then
+            sed -i 's/KSU_VERSION_FALLBACK := .*/KSU_VERSION_FALLBACK := 33420/' kernel_source/drivers/kernelsu/kernel/Kbuild || true
+          fi
+
+          echo "✅ KernelSU-Next v3.4.2 integrated with UAPI 5"
+
+      - name: "🛡️ Patch Kernel Source & SuSFS 2.x & RAM Optimization"
+        run: |
+          VARIANT="${{ inputs.su_variant }}"
+          cd $GITHUB_WORKSPACE
+
+          echo "=== Running patch_phoenix.py ==="
+          python3 scripts/patch_phoenix.py kernel_source patches
+
+          if [ "$VARIANT" = "ksun_uapi5_nosusfs" ] || [ "$VARIANT" = "vanilla" ]; then
+            echo "Disabling SuSFS in kernel tree for no-susfs variant..."
+            sed -i 's/obj-\$(CONFIG_KSU_SUSFS) += susfs.o/# obj-\$(CONFIG_KSU_SUSFS) += susfs.o/' kernel_source/fs/Makefile || true
+          fi
+
+      - name: "⚙️ Generate .config (vendor/phoenix_defconfig)"
+        working-directory: kernel_source
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/out
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+
+          make -j$(nproc --all) \
+            O=$GITHUB_WORKSPACE/out \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            vendor/phoenix_defconfig
+
+          echo "=== Verifying Generated Configs ==="
+          grep -E "CONFIG_KSU|CONFIG_SUSFS|CONFIG_ZRAM|CONFIG_ZSTD|CONFIG_ANDROID_SIMPLE_LMK|CONFIG_LITTLE_CPU_MASK" $GITHUB_WORKSPACE/out/.config || true
+
+      - name: "🏗️ Compile Phoenix Kernel"
+        working-directory: kernel_source
+        run: |
+          set -o pipefail
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          START_TIME=$(date +%s)
+
+          make -j$(nproc --all) \
+            O=$GITHUB_WORKSPACE/out \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            2>&1 | tee $GITHUB_WORKSPACE/build.log
+
+          END_TIME=$(date +%s)
+          echo "Compilation completed in $((END_TIME - START_TIME)) seconds."
+
+      - name: "📦 Package AnyKernel3 Flashable Zip"
+        id: package
+        run: |
+          BUILD_DATE=$(date "+%Y%m%d-%H%M")
+          VARIANT="${{ inputs.su_variant }}"
+          case "$VARIANT" in
+            ksun_uapi5_susfs)
+              VARIANT_TAG="KSUNext-uapi5-SuSFS-v2.2"
+              ;;
+            ksun_uapi5_nosusfs)
+              VARIANT_TAG="KSUNext-uapi5-NoSuSFS"
+              ;;
+            vanilla)
+              VARIANT_TAG="Vanilla-Optimized"
+              ;;
+            *)
+              VARIANT_TAG="$VARIANT"
+              ;;
+          esac
+
+          FINAL_ZIP="Phoenix-4.14-${VARIANT_TAG}-${{ inputs.clang_type }}-${BUILD_DATE}.zip"
+          echo "Packaging $FINAL_ZIP..."
+
+          mkdir -p $GITHUB_WORKSPACE/ak3
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git $GITHUB_WORKSPACE/ak3
+
+          # Copy custom anykernel.sh and performance script
+          cp -f $GITHUB_WORKSPACE/templates/anykernel.sh $GITHUB_WORKSPACE/ak3/anykernel.sh
+          cp -f $GITHUB_WORKSPACE/scripts/00-phoenix-perf.sh $GITHUB_WORKSPACE/ak3/00-phoenix-perf.sh
+          chmod 755 $GITHUB_WORKSPACE/ak3/00-phoenix-perf.sh
+
+          BOOT_DIR="$GITHUB_WORKSPACE/out/arch/arm64/boot"
+          if [ -f "$BOOT_DIR/Image.gz-dtb" ]; then
+            cp -f "$BOOT_DIR/Image.gz-dtb" $GITHUB_WORKSPACE/ak3/Image.gz-dtb
+            echo "Copied Image.gz-dtb"
+          fi
+          if [ -f "$BOOT_DIR/Image.gz" ]; then
+            cp -f "$BOOT_DIR/Image.gz" $GITHUB_WORKSPACE/ak3/Image.gz
+            echo "Copied Image.gz"
+          fi
+          if [ -f "$BOOT_DIR/Image" ]; then
+            cp -f "$BOOT_DIR/Image" $GITHUB_WORKSPACE/ak3/Image
+            echo "Copied Image"
+          fi
+          if [ -f "$BOOT_DIR/dtbo.img" ]; then
+            cp -f "$BOOT_DIR/dtbo.img" $GITHUB_WORKSPACE/ak3/dtbo.img
+            echo "Copied dtbo.img"
+          fi
+
+          # Find sdmmagpie.dtb
+          DTB_PATH=$(find $BOOT_DIR/dts -name "sdmmagpie.dtb" | head -n 1)
+          if [ -n "$DTB_PATH" ] && [ -f "$DTB_PATH" ]; then
+            cp -f "$DTB_PATH" $GITHUB_WORKSPACE/ak3/dtb
+            echo "Copied $DTB_PATH to dtb"
+          fi
+
+          mkdir -p $GITHUB_WORKSPACE/release_dir
+          cd $GITHUB_WORKSPACE/ak3
+          zip -r9 "$GITHUB_WORKSPACE/release_dir/$FINAL_ZIP" * -x .git README.md *placeholder
+
+          echo "final_zip=$FINAL_ZIP" >> $GITHUB_OUTPUT
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "variant_tag=$VARIANT_TAG" >> $GITHUB_OUTPUT
+
+          echo "=== Generated Flashable Zip ==="
+          ls -lh "$GITHUB_WORKSPACE/release_dir/$FINAL_ZIP"
+
+      - name: "📤 Upload Build Artifacts"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.final_zip }}
+          path: |
+            release_dir/*.zip
+            build.log
+
+      - name: "🚀 Publish GitHub Release"
+        if: ${{ inputs.make_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: "Kernel Release ${{ inputs.release_tag }} (Poco X2 / Redmi K30)"
+          draft: false
+          prerelease: false
+          files: |
+            release_dir/*.zip
+          body: |
+            ### 📱 Poco X2 / Redmi K30 4G (phoenix / phoenixin) Kernel Build
+            - **Kernel Base**: Linux 4.14.357-openela (`tillua467-s-Playground/android_kernel_xiaomi_phoenix` @ `v2.4`)
+            - **SU / Root Integration**: KernelSU-Next v3.4.2 Official Release (**UAPI 5**)
+            - **SuSFS Version**: SuSFS v2.2.0 Non-GKI
+            - **RAM & Memory Optimizations**:
+              - ZRAM with ZSTD Ultra Compression (`CONFIG_ZRAM_DEFAULT_COMP_ALGORITHM="zstd"`)
+              - Simple LMK CPU Cluster Binding (`LITTLE_CPU_MASK=63`, `BIG_CPU_MASK=192`)
+              - VM Tuning (`swappiness=160`, `page-cluster=0`, `vfs_cache_pressure=80`, `extra_free_kbytes=24576`)
+              - UFS 2.1 Multi-Queue I/O Scheduler (`mq-deadline` / `bfq` with 256KB read-ahead)
+              - Devfreq Memory Bandwidth & Latency Governors
+              - TCP BBR Congestion Control with FQ Hardware Pacing
+            - **Compiler**: ${{ inputs.clang_type }}
+            - **Build Date**: ${{ steps.package.outputs.build_date }}
+            - **Flashable Format**: AnyKernel3 recovery zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

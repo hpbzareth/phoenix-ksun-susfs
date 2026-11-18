@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+out/
+build.log
+release_dir/
+ak3/
+kernel_source/
+clang/
