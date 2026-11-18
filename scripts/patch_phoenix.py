@@ -429,6 +429,7 @@ def tune_phoenix_defconfig(kernel_dir):
     # Stripping lines to replace
     strip_keys = [
         "CONFIG_LOCALVERSION=",
+        "CONFIG_LOCALVERSION_AUTO",
         "CONFIG_KSU",
         "CONFIG_SUSFS",
         "CONFIG_OVERLAY_FS",
@@ -508,7 +509,8 @@ CONFIG_DEFAULT_TCP_CONG="bbr"
 CONFIG_NET_SCH_FQ=y
 CONFIG_DEFAULT_NET_SCH="fq"
 CONFIG_DEFAULT_FQ=y
-CONFIG_LOCALVERSION="-Phoenix-KSUNext-uapi5-SuSFS-v2.2"
+# CONFIG_LOCALVERSION_AUTO is not set
+CONFIG_LOCALVERSION="-Phoenix-KSUN-SuSFS"
 """
     clean_lines.append(tuning_lines)
     with open(cfg_path, "w", encoding="utf-8", newline="\n") as f:

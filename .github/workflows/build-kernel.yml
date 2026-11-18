@@ -133,6 +133,11 @@ jobs:
           VARIANT="${{ inputs.su_variant }}"
           cd $GITHUB_WORKSPACE
 
+          # Disable dirty tag and git hash suffix to keep utsrelease within 64 chars
+          touch kernel_source/.scmversion
+          sed -i 's/res="${res}-dirty"/# res="${res}-dirty"/' kernel_source/scripts/setlocalversion || true
+          sed -i 's/echo "+"/# echo "+"/' kernel_source/scripts/setlocalversion || true
+
           echo "=== Running patch_phoenix.py ==="
           python3 scripts/patch_phoenix.py kernel_source patches
 
